@@ -549,6 +549,63 @@ func runDetailedTest(ctx context.Context, session *appSession, selectedDC string
 	session.sendWSMessage("test_complete", results)
 }
 
+func runEdgeDetailedTest(ctx context.Context, session *appSession, selectedDC string, delay int, params startEdgeTestRequest) {
+	var testIPList []string
+	scanByIP := make(map[string]ScanResult)
+	session.scanMutex.Lock()
+	for _, res := range session.scanResults {
+		if selectedDC == "" || res.DataCenter == selectedDC {
+			testIPList = append(testIPList, res.IP)
+			scanByIP[res.IP] = res
+		}
+	}
+	session.scanMutex.Unlock()
+	if len(testIPList) == 0 {
+		session.sendWSMessage("error", "没有找到可测试的 IP 地址")
+		return
+	}
+	params.Protocol = strings.ToLower(strings.TrimSpace(params.Protocol))
+	if params.Port <= 0 {
+		params.Port = 443
+	}
+	session.sendWSMessage("log", fmt.Sprintf("开始 EdgeTunnel 真连接测试：%s，%d 个 IP，并发 50", selectedDC, len(testIPList)))
+	total := len(testIPList)
+	session.sendWSMessage("test_progress", map[string]interface{}{"current": 0, "total": total})
+	results := make([]TestResult, 0, total)
+	var resultMutex sync.Mutex
+	wasCanceled := runBoundedWorkers(ctx, total, 50, 5, func(current, total int) {
+		session.sendWSMessage("test_progress", map[string]interface{}{"current": current, "total": total})
+	}, func(idx int) {
+		ip := testIPList[idx]
+		requestParams := params
+		requestParams.IP = ip
+		result := runEdgeTunnelRequest(ctx, requestParams)
+		if !result.Success {
+			return
+		}
+		scan := scanByIP[ip]
+		latency := time.Duration(result.LatencyMS) * time.Millisecond
+		testResult := TestResult{IP: ip, Port: params.Port, DataCenter: scan.DataCenter, DCCountry: scan.DCCountry, Region: scan.Region, City: scan.City, MinLatency: latency, MaxLatency: latency, AvgLatency: latency, LossRate: 0}
+		session.sendWSMessage("test_result", testResult)
+		resultMutex.Lock()
+		results = append(results, testResult)
+		resultMutex.Unlock()
+	})
+	if wasCanceled || ctx.Err() != nil {
+		session.sendWSMessage("log", "EdgeTunnel 详细测试已被终止")
+		return
+	}
+	if len(results) == 0 {
+		session.sendWSMessage("error", "EdgeTunnel 详细测试完成，但没有任何 IP 通过延迟测试")
+		return
+	}
+	sortOfficialTestResults(results)
+	session.testMutex.Lock()
+	session.testResults = append([]TestResult(nil), results...)
+	session.testMutex.Unlock()
+	session.sendWSMessage("test_complete", results)
+}
+
 func formatFailureSummary(title string, counts map[string]int, samples map[string]string) string {
 	if len(counts) == 0 {
 		return title + ": 没有记录到失败原因。"

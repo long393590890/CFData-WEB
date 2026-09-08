@@ -8,30 +8,54 @@ type wsRequest struct {
 }
 
 type startTaskRequest struct {
-	IPType            int     `json:"ipType"`
-	Threads           int     `json:"threads"`
-	Port              int     `json:"port"`
-	Delay             int     `json:"delay"`
-	ScanMode          string  `json:"scanMode"`
-	AutoSpeed         bool    `json:"autoSpeed"`
-	OfficialTargetDC  string  `json:"officialTargetDC"`
-	OfficialSpeedPort int     `json:"officialSpeedPort"`
-	OfficialSpeedURL  string  `json:"officialSpeedURL"`
-	OfficialSpeedMin  float64 `json:"officialSpeedMin"`
-	OfficialSpeedLimit int    `json:"officialSpeedLimit"`
+	IPType             int     `json:"ipType"`
+	Threads            int     `json:"threads"`
+	Port               int     `json:"port"`
+	Delay              int     `json:"delay"`
+	ScanMode           string  `json:"scanMode"`
+	AutoSpeed          bool    `json:"autoSpeed"`
+	OfficialTargetDC   string  `json:"officialTargetDC"`
+	OfficialSpeedPort  int     `json:"officialSpeedPort"`
+	OfficialSpeedURL   string  `json:"officialSpeedURL"`
+	OfficialSpeedMin   float64 `json:"officialSpeedMin"`
+	OfficialSpeedLimit int     `json:"officialSpeedLimit"`
+	EdgeTestEnabled    bool    `json:"edgeTestEnabled"`
+	EdgeTestHost       string  `json:"edgeTestHost"`
+	EdgeTestPort       int     `json:"edgeTestPort"`
+	EdgeTestProtocol   string  `json:"edgeTestProtocol"`
+	EdgeTestUUID       string  `json:"edgeTestUUID"`
+	EdgeTestPath       string  `json:"edgeTestPath"`
+	EdgeTestTargetURL  string  `json:"edgeTestTargetURL"`
 }
 
 type startTestRequest struct {
-	DC       string `json:"dc"`
-	Port     int    `json:"port"`
-	Delay    int    `json:"delay"`
-	ScanMode string `json:"scanMode"`
+	DC                string `json:"dc"`
+	Port              int    `json:"port"`
+	Delay             int    `json:"delay"`
+	ScanMode          string `json:"scanMode"`
+	EdgeTestEnabled   bool   `json:"edgeTestEnabled"`
+	EdgeTestHost      string `json:"edgeTestHost"`
+	EdgeTestPort      int    `json:"edgeTestPort"`
+	EdgeTestProtocol  string `json:"edgeTestProtocol"`
+	EdgeTestUUID      string `json:"edgeTestUUID"`
+	EdgeTestPath      string `json:"edgeTestPath"`
+	EdgeTestTargetURL string `json:"edgeTestTargetURL"`
 }
 
 type startSpeedTestRequest struct {
 	IP   string `json:"ip"`
 	Port int    `json:"port"`
 	URL  string `json:"url"`
+}
+
+type startEdgeTestRequest struct {
+	IP        string `json:"ip"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Protocol  string `json:"protocol"`
+	UUID      string `json:"uuid"`
+	Path      string `json:"path"`
+	TargetURL string `json:"targetURL"`
 }
 
 type startOfficialSpeedBatchRequest struct {

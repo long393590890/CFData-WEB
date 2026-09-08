@@ -1674,6 +1674,53 @@
             <button class="mode-btn" id="btnNSB" onclick="switchMode('nsb')">📂 非标优选</button>
         </div>
 
+        <div class="section-box" id="edgeTestPanel">
+            <div class="control-title">
+                <span>🔌 单个 IP EdgeTunnel 测试</span>
+                <span style="font-size:12px;color:var(--text-secondary);">按真实节点协议测试</span>
+            </div>
+            <div class="option-item">
+                <span class="label">🎯 候选 IP</span>
+                <input id="edgeTestIP" type="text" placeholder="例如 1.2.3.4">
+            </div>
+            <div class="option-item">
+                <span class="label">🌐 EdgeTunnel 域名</span>
+                <input id="edgeTestHost" type="text" placeholder="例如 worker.example.com">
+            </div>
+            <div class="option-item">
+                <span class="label">🔐 协议</span>
+                <select id="edgeTestProtocol" onchange="updateEdgeCredentialLabel()">
+                    <option value="vless" selected>VLESS</option>
+                    <option value="trojan">Trojan</option>
+                </select>
+            </div>
+            <div class="option-item">
+                <span class="label" id="edgeCredentialLabel">🪪 UUID</span>
+                <input id="edgeTestUUID" type="text" placeholder="VLESS UUID 或 Trojan 密码">
+            </div>
+            <div class="option-item">
+                <span class="label">🛣️ WS Path</span>
+                <input id="edgeTestPath" type="text" value="/" placeholder="例如 /long">
+            </div>
+            <div class="option-item">
+                <span class="label">🚪 EdgeTunnel 端口</span>
+                <input id="edgeTestPort" type="number" value="443" min="1" max="65535">
+            </div>
+            <div class="option-item full-width">
+                <span class="label">🔗 目标 URL</span>
+                <input id="edgeTestTargetURL" type="url" value="http://speed.cloudflare.com/__down?bytes=1024" placeholder="http://example.com/ 或 https://example.com/">
+            </div>
+            <div class="option-item full-width" style="display:flex;align-items:center;gap:10px;">
+                <label class="label" for="edgeTestEnabled">⚡ 扫描时使用 EdgeTunnel 延迟</label>
+                <input id="edgeTestEnabled" type="checkbox">
+                <span style="font-size:12px;color:var(--text-secondary);">打开后，详细测试阶段按上方配置并发测试每个节点</span>
+            </div>
+            <div class="option-item full-width" style="display:flex;align-items:center;gap:10px;">
+                <button id="btnEdgeTest" class="action-btn export-btn" onclick="startEdgeTest()">▶️ 开始 EdgeTunnel 测试</button>
+                <span id="edgeTestResult" style="color:var(--text-secondary);">尚未测试</span>
+            </div>
+        </div>
+
         <div class="section-box controls">
             <div id="officialControls">
                 <div class="control-title">
@@ -1995,6 +2042,13 @@
                     <span>详细测试结果 <span class="badge" id="testCount">0</span></span>
                     <span class="table-actions">
                         <span class="official-test-actions">
+                            <select id="officialTestRegionFilter" class="table-filter-select" onchange="setOfficialTestFilter('region', this.value)">
+                                <option value="all" selected>全部落地区域</option>
+                            </select>
+                            <select id="officialTestDCFilter" class="table-filter-select" onchange="setOfficialTestFilter('dc', this.value)">
+                                <option value="all" selected>全部数据中心</option>
+                            </select>
+                            <button class="action-btn" onclick="clearOfficialTestFilters()">清空筛选</button>
                             <select id="officialTestQualifiedFilter" class="table-filter-select" style="display:inline-block;" onchange="setOfficialTestQualifiedFilter(this.value)">
                                 <option value="all" selected>展示全部结果</option>
                                 <option value="qualified">仅展示合格</option>
@@ -2012,6 +2066,7 @@
                     <table id="testTable">
                         <thead>
                             <tr>
+                                <th>序号</th>
                                 <th>IP 地址</th>
                                 <th>端口</th>
                                 <th>数据中心</th>
@@ -2348,6 +2403,8 @@
         const AUTO_SPEED_URL_VALUE = 'auto';
         const AUTO_SPEED_URL_LABEL = '自动选择';
         let officialTestQualifiedFilter = 'all';
+        let officialTestRegionFilter = 'all';
+        let officialTestDCFilter = 'all';
         let officialSpeedMinValue = 0.1;
         let officialSpeedEnabledForResults = false;
         let officialAutoSpeedPending = false;
@@ -2390,6 +2447,9 @@
         const githubAccountStorageKey = 'cfdata-github-accounts';
         const githubSessionTokens = new Map();
         const githubTokenCryptoSalt = 'cfdata-github-token-v1';
+        const pageStateStorageKey = 'cfdata-page-state';
+        let pageStateSaveTimer = null;
+        let restoringPageState = false;
 
         const LATENCY_COLORS = [
             { end: 50, color: '#1f8a3b' },
@@ -2695,6 +2755,15 @@
                     speedUrl: resolveSpeedTestUrl('nsbSpeedUrl', 'nsbSpeedUrlPreset'),
                     sourceUrl: val('nsbSourceUrl'),
                 },
+                edge: {
+                    ip: val('edgeTestIP'),
+                    host: val('edgeTestHost'),
+                    protocol: selVal('edgeTestProtocol'),
+                    uuid: val('edgeTestUUID'),
+                    path: val('edgeTestPath'),
+                    port: val('edgeTestPort'),
+                    targetURL: val('edgeTestTargetURL'),
+                },
             };
         }
 
@@ -2707,6 +2776,7 @@
         function applyConfigValues(config) {
             const o = config.official || {};
             const n = config.nsb || {};
+            const e = config.edge || {};
             setValue('officialScanMode', o.scanMode);
             setValue('officialIpType', o.ipType);
             setValue('officialTestPort', o.port);
@@ -2730,6 +2800,14 @@
             if (n.compactView) setValue('nsbCompactView', n.compactView);
             setValue('nsbOutFile', n.outFile);
             setValue('nsbSourceUrl', n.sourceUrl);
+            setValue('edgeTestIP', e.ip);
+            setValue('edgeTestHost', e.host);
+            setValue('edgeTestProtocol', e.protocol);
+            setValue('edgeTestUUID', e.uuid);
+            setValue('edgeTestPath', e.path);
+            setValue('edgeTestPort', e.port);
+            setValue('edgeTestTargetURL', e.targetURL);
+            updateEdgeCredentialLabel();
             if (o.speedUrl) applySpeedUrlConfig('officialSpeedUrl', 'officialSpeedUrlPreset', o.speedUrl);
             if (n.speedUrl) applySpeedUrlConfig('nsbSpeedUrl', 'nsbSpeedUrlPreset', n.speedUrl);
             syncOfficialSpeedConfigState();
@@ -2737,6 +2815,76 @@
             updateOfficialAutoSpeedControls();
             updateNSBSpeedControls();
             updateNSBCompactToggle();
+        }
+
+        function capturePageState() {
+            const controls = {};
+            document.querySelectorAll('input[id], select[id], textarea[id]').forEach((el) => {
+                if (el.type === 'file' || el.id === 'githubToken' || el.readOnly) return;
+                controls[el.id] = { value: el.value, checked: !!el.checked };
+            });
+            return {
+                version: 1,
+                controls,
+            };
+        }
+
+        function savePageStateToLS() {
+            if (restoringPageState) return;
+            window.clearTimeout(pageStateSaveTimer);
+            pageStateSaveTimer = window.setTimeout(() => {
+                try {
+                    localStorage.setItem(pageStateStorageKey, JSON.stringify(capturePageState()));
+                } catch (e) {
+                    console.warn('[cfdata] 页面状态保存失败:', e);
+                }
+            }, 150);
+        }
+
+        function flushPageStateToLS() {
+            if (restoringPageState) return;
+            window.clearTimeout(pageStateSaveTimer);
+            try {
+                localStorage.setItem(pageStateStorageKey, JSON.stringify(capturePageState()));
+            } catch (e) {
+                console.warn('[cfdata] 页面状态保存失败:', e);
+            }
+        }
+
+        function applyPageState(state) {
+            if (!state || typeof state !== 'object') return;
+            restoringPageState = true;
+            try {
+                const controls = state.controls || {};
+                Object.keys(controls).forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (!el || el.type === 'file' || id === 'githubToken' || el.readOnly) return;
+                    const item = controls[id] || {};
+                    if ('value' in item) el.value = item.value;
+                    if ('checked' in item && (el.type === 'checkbox' || el.type === 'radio')) el.checked = !!item.checked;
+                });
+                syncSpeedUrlPreset('officialSpeedUrl', 'officialSpeedUrlPreset');
+                syncSpeedUrlPreset('nsbSpeedUrl', 'nsbSpeedUrlPreset');
+                updateEdgeCredentialLabel();
+                updateOfficialAutoSpeedControls();
+                updateNSBSpeedControls();
+                updateNSBFallbackPortDefault();
+            } finally {
+                restoringPageState = false;
+            }
+        }
+
+        function loadPageStateFromLS() {
+            try {
+                const raw = localStorage.getItem(pageStateStorageKey);
+                if (raw) {
+                    applyPageState(JSON.parse(raw));
+                    // Rewrite legacy state so old result/task caches are removed.
+                    flushPageStateToLS();
+                }
+            } catch (e) {
+                console.warn('[cfdata] 页面状态加载失败:', e);
+            }
         }
 
         function saveConfigToLS() {
@@ -2747,6 +2895,7 @@
                 showNoticeCard('保存配置失败: ' + (e.message || String(e)));
                 return;
             }
+            savePageStateToLS();
             log('当前配置已保存到 localStorage');
         }
 
@@ -2764,6 +2913,7 @@
             }
             try {
                 applyConfigValues(JSON.parse(raw));
+                savePageStateToLS();
             } catch (e) {
                 showNoticeCard('解析配置失败: ' + (e.message || String(e)));
                 return;
@@ -2813,6 +2963,7 @@
             try {
                 localStorage.removeItem('cfdata-config');
                 localStorage.removeItem('cfdata-autoload');
+                localStorage.removeItem(pageStateStorageKey);
             } catch (e) {
                 showNoticeCard('删除配置失败: ' + (e.message || String(e)));
                 return;
@@ -3178,6 +3329,10 @@
             return getScanMode() === 'httping' ? 'HTTPing' : 'TCPing';
         }
 
+        function getTestModeLabel() {
+            return document.getElementById('edgeTestEnabled')?.checked ? 'EdgeTunnel' : getScanModeLabel();
+        }
+
         function updateScanModeHint() {
             const mode = getScanMode();
             const hint = getScanModeHint();
@@ -3226,6 +3381,7 @@
             }
             if (!isTaskRunning) resetProgress();
             updateScanModeHint();
+            savePageStateToLS();
             log(`切换至：${mode === 'official' ? '官方优选' : '非标优选'}`);
         }
 
@@ -4192,12 +4348,13 @@
             dcList = list || [];
             const tbody = document.querySelector('#dcTable tbody');
             tbody.innerHTML = '';
+            const edgeBatchRunning = !!document.getElementById('edgeTestEnabled')?.checked && isTaskRunning;
             dcList.forEach((dc) => {
                 const isTested = testedDCs.has(dc.DataCenter);
                 const isTesting = currentTestingDC === dc.DataCenter;
                 const lcFactor = getLatencyColorFactor();
                 const latencyColor = getLatencyColor(dc.MinLatency, lcFactor);
-                const btn = isTesting ? `<button class="action-btn" disabled>测试中...</button>` : (isTested ? `<button class="action-btn selected" onclick="selectDC('${dc.DataCenter}')">重新测试</button>` : `<button class="action-btn" onclick="selectDC('${dc.DataCenter}')">选择测试</button>`);
+                const btn = edgeBatchRunning ? `<button class="action-btn" disabled>批量测试中...</button>` : (isTesting ? `<button class="action-btn" disabled>测试中...</button>` : (isTested ? `<button class="action-btn selected" onclick="selectDC('${dc.DataCenter}')">重新测试</button>` : `<button class="action-btn" onclick="selectDC('${dc.DataCenter}')">选择测试</button>`));
                 const tr = `<tr><td><strong>${dc.DataCenter}</strong></td><td>${dc.DCCountry || '-'}</td><td>${dc.City}</td><td>${dc.IPCount}</td><td style="color:${latencyColor}; font-weight:600;">${dc.MinLatency} ms</td><td>${btn}</td></tr>`;
                 tbody.insertAdjacentHTML('beforeend', tr);
             });
@@ -4208,6 +4365,8 @@
         function selectDC(dc) {
             if (requireProxyWarning(() => selectDC(dc))) return;
             if (isTaskRunning && currentTestingDC !== '') return;
+            const edgeConfig = validateEdgeTestConfig();
+            if (!edgeConfig) return;
             const port = parseInt(document.getElementById('officialTestPort').value);
             const delay = parseInt(document.getElementById('officialDelay').value) || 500;
 
@@ -4229,7 +4388,7 @@
             resetProgress();
             progressBox.style.display = 'block';
             showDCSelection(dcList);
-            if (!wsSend({ type: 'start_test', data: { dc, port, delay, scanMode: getScanMode() } })) {
+            if (!wsSend({ type: 'start_test', data: { dc, port, delay, scanMode: getScanMode(), edgeTestEnabled: edgeConfig.enabled, edgeTestHost: edgeConfig.host, edgeTestPort: edgeConfig.port, edgeTestProtocol: edgeConfig.protocol, edgeTestUUID: edgeConfig.uuid, edgeTestPath: edgeConfig.path, edgeTestTargetURL: edgeConfig.targetURL } })) {
                 currentTestingDC = '';
                 isTaskRunning = false;
                 showDCSelection(dcList);
@@ -4240,7 +4399,7 @@
             switchTab('test');
         }
 
-        function renderTestRow(res) {
+        function renderTestRow(res, rowNumber = '') {
             const port = res.Port || parseInt(document.getElementById('officialTestPort').value) || 443;
             const meta = testResultToObject(res);
             const speedText = res.Speed || '未测速';
@@ -4250,7 +4409,7 @@
             const speedDisabled = isTesting || isTaskRunning || officialBatchSpeedRunning;
             const buttonText = isTesting ? '测速中' : (res.Speed ? '重新测速' : '测速');
             const lcFactor = getLatencyColorFactor();
-            const row = `<tr class="${speedStatus === 'qualified' ? 'row-qualified' : (speedStatus === 'unqualified' ? 'row-unqualified' : '')}"><td>${renderIPCell(res.IP, res.OriginalInput || res.originalInput)}</td><td><span class="copy-ip" onclick="copyToClipboard('${port}', event)">${port}</span></td><td>${meta.dc || '-'}</td><td>${meta.dcCountry || '-'}</td><td>${meta.region || '-'}</td><td>${meta.city || '-'}</td><td>${getScanModeLabel()}</td><td>${(res.LossRate * 100).toFixed(0)}%</td><td>${(res.MinLatency / 1_000_000).toFixed(0)} ms</td><td>${(res.MaxLatency / 1_000_000).toFixed(0)} ms</td><td style="color:${getLatencyColor(res.AvgLatency / 1_000_000, lcFactor)}; font-weight:600;">${(res.AvgLatency / 1_000_000).toFixed(0)} ms</td><td style="display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:none;"><span class="speed-result" id="speed-val-${res.IP.replace(/[:.]/g, '_')}" style="color:${speedColor};"><span>${speedText}</span>${renderSpeedStatusTag(speedStatus)}</span><button class="action-btn speed-btn" id="btn-speed-${res.IP.replace(/[:.]/g, '_')}" onclick="runSpeedTest('${res.IP}')" ${speedDisabled ? 'disabled' : ''}>${buttonText}</button></td></tr>`;
+            const row = `<tr class="${speedStatus === 'qualified' ? 'row-qualified' : (speedStatus === 'unqualified' ? 'row-unqualified' : '')}"><td>${rowNumber}</td><td>${renderIPCell(res.IP, res.OriginalInput || res.originalInput)}</td><td><span class="copy-ip" onclick="copyToClipboard('${port}', event)">${port}</span></td><td>${meta.dc || '-'}</td><td>${meta.dcCountry || '-'}</td><td>${meta.region || '-'}</td><td>${meta.city || '-'}</td><td>${getTestModeLabel()}</td><td>${(res.LossRate * 100).toFixed(0)}%</td><td>${(res.MinLatency / 1_000_000).toFixed(0)} ms</td><td>${(res.MaxLatency / 1_000_000).toFixed(0)} ms</td><td style="color:${getLatencyColor(res.AvgLatency / 1_000_000, lcFactor)}; font-weight:600;">${(res.AvgLatency / 1_000_000).toFixed(0)} ms</td><td style="display:flex;justify-content:space-between;align-items:center;gap:8px;border-bottom:none;"><span class="speed-result" id="speed-val-${res.IP.replace(/[:.]/g, '_')}" style="color:${speedColor};"><span>${speedText}</span>${renderSpeedStatusTag(speedStatus)}</span><button class="action-btn speed-btn" id="btn-speed-${res.IP.replace(/[:.]/g, '_')}" onclick="runSpeedTest('${res.IP}')" ${speedDisabled ? 'disabled' : ''}>${buttonText}</button></td></tr>`;
             document.querySelector('#testTable tbody').insertAdjacentHTML('beforeend', row);
         }
 
@@ -4258,7 +4417,7 @@
             testResultsCount++;
             testData.push(res);
             updateBadge('testCount', getFilteredOfficialTestData().length);
-            if (render && matchesOfficialQualifiedFilter(res, officialTestQualifiedFilter)) renderTestRow(res);
+            if (render && document.querySelector('#testTable tbody').children.length < 200 && matchesOfficialQualifiedFilter(res, officialTestQualifiedFilter) && matchesOfficialTestFilters(res)) renderTestRow(res, testResultsCount);
             updateBatchSpeedButton();
         }
 
@@ -4274,14 +4433,52 @@
             if (currentMode === 'official') renderAllTestResults();
         }
 
+        function setOfficialTestFilter(type, value) {
+            if (type === 'region') officialTestRegionFilter = value || 'all';
+            if (type === 'dc') officialTestDCFilter = value || 'all';
+            renderAllTestResults();
+        }
+
+        function clearOfficialTestFilters() {
+            officialTestRegionFilter = 'all';
+            officialTestDCFilter = 'all';
+            const region = document.getElementById('officialTestRegionFilter');
+            const dc = document.getElementById('officialTestDCFilter');
+            if (region) region.value = 'all';
+            if (dc) dc.value = 'all';
+            renderAllTestResults();
+        }
+
+        function updateOfficialTestFilterOptions() {
+            const region = document.getElementById('officialTestRegionFilter');
+            const dc = document.getElementById('officialTestDCFilter');
+            const regions = [...new Set(testData.map((row) => String(row.DCCountry || '').trim()).filter(Boolean))].sort();
+            const dcs = [...new Set(testData.map((row) => String(row.DataCenter || '').trim()).filter(Boolean))].sort();
+            if (region) {
+                region.innerHTML = '<option value="all">全部落地区域</option>' + regions.map((item) => `<option value="${escapeHTML(item)}">${escapeHTML(item)}</option>`).join('');
+                region.value = regions.includes(officialTestRegionFilter) ? officialTestRegionFilter : 'all';
+            }
+            if (dc) {
+                dc.innerHTML = '<option value="all">全部数据中心</option>' + dcs.map((item) => `<option value="${escapeHTML(item)}">${escapeHTML(item)}</option>`).join('');
+                dc.value = dcs.includes(officialTestDCFilter) ? officialTestDCFilter : 'all';
+            }
+        }
+
+        function matchesOfficialTestFilters(row) {
+            const region = String(row.DCCountry || '').trim();
+            const dc = String(row.DataCenter || '').trim();
+            return (officialTestRegionFilter === 'all' || region === officialTestRegionFilter) && (officialTestDCFilter === 'all' || dc === officialTestDCFilter);
+        }
+
         function renderAllTestResults() {
             syncOfficialSpeedConfigState();
+            updateOfficialTestFilterOptions();
             const tbody = document.querySelector('#testTable tbody');
             tbody.innerHTML = '';
-            const rows = getFilteredOfficialTestData();
+            const rows = getFilteredOfficialTestData().filter(matchesOfficialTestFilters);
             testResultsCount = rows.length;
             updateBadge('testCount', testResultsCount);
-            rows.forEach(renderTestRow);
+            rows.slice(0, 200).forEach((row, index) => renderTestRow(row, index + 1));
             updateBatchSpeedButton();
         }
 
@@ -4323,6 +4520,55 @@
                     btn.disabled = false;
                 }
                 currentSpeedTestingIP = '';
+            }
+        }
+
+        function updateEdgeCredentialLabel() {
+            const protocol = document.getElementById('edgeTestProtocol')?.value || 'vless';
+            const label = document.getElementById('edgeCredentialLabel');
+            const input = document.getElementById('edgeTestUUID');
+            if (protocol === 'trojan') {
+                if (label) label.textContent = '🔑 密码';
+                if (input) input.placeholder = 'Trojan 明文密码';
+            } else {
+                if (label) label.textContent = '🪪 UUID';
+                if (input) input.placeholder = 'VLESS UUID';
+            }
+        }
+
+        function startEdgeTest() {
+            if (isTaskRunning || officialBatchSpeedRunning || nsbBatchSpeedRunning) {
+                showNoticeCard('当前已有任务运行，请等待完成后再试');
+                return;
+            }
+            const ip = document.getElementById('edgeTestIP')?.value.trim() || '';
+            const host = document.getElementById('edgeTestHost')?.value.trim() || '';
+            const uuid = document.getElementById('edgeTestUUID')?.value.trim() || '';
+            const protocol = document.getElementById('edgeTestProtocol')?.value || 'vless';
+            const path = document.getElementById('edgeTestPath')?.value.trim() || '/';
+            const port = parseInt(document.getElementById('edgeTestPort')?.value, 10) || 443;
+            const targetURL = document.getElementById('edgeTestTargetURL')?.value.trim() || '';
+            if (!ip || !host || !uuid) {
+                showNoticeCard('候选 IP、EdgeTunnel 域名和凭据不能为空');
+                return;
+            }
+            const result = document.getElementById('edgeTestResult');
+            if (result) {
+                result.textContent = '测试中...';
+                result.style.color = 'var(--text-secondary)';
+            }
+            isTaskRunning = true;
+            runningTaskLabel = '单 IP EdgeTunnel';
+            runningTaskMode = 'edge';
+            runningTaskTab = 'scan';
+            setStartLoading(getRunningButtonText());
+            progressBox.style.display = 'block';
+            resetProgress();
+            progressBar.textContent = 'EdgeTunnel 测试中...';
+            if (!wsSend({ type: 'start_edge_test', data: { ip, host, port, protocol, uuid, path, targetURL } })) {
+                finishRunningTask('✨ 开始扫描与测试');
+                if (result) result.textContent = '连接未就绪';
+                showNoticeCard('连接未就绪，请等待重连后再试');
             }
         }
 
@@ -4569,6 +4815,32 @@
             }
         }
 
+        function getEdgeTestConfig() {
+            return {
+                enabled: !!document.getElementById('edgeTestEnabled')?.checked,
+                host: document.getElementById('edgeTestHost')?.value.trim() || '',
+                port: parseInt(document.getElementById('edgeTestPort')?.value, 10) || 443,
+                protocol: document.getElementById('edgeTestProtocol')?.value || 'vless',
+                uuid: document.getElementById('edgeTestUUID')?.value.trim() || '',
+                path: document.getElementById('edgeTestPath')?.value.trim() || '/',
+                targetURL: document.getElementById('edgeTestTargetURL')?.value.trim() || '',
+            };
+        }
+
+        function validateEdgeTestConfig() {
+            const config = getEdgeTestConfig();
+            if (!config.enabled) return config;
+            if (!config.host || !config.uuid) {
+                showNoticeCard('已开启 EdgeTunnel 延迟测试，请先配置域名和 UUID/密码');
+                return null;
+            }
+            if (config.protocol !== 'vless' && config.protocol !== 'trojan') {
+                showNoticeCard('EdgeTunnel 协议必须是 VLESS 或 Trojan');
+                return null;
+            }
+            return config;
+        }
+
         function confirmStopCurrentTask() {
             if (!wsSend({ type: 'stop_task', data: {} })) {
                 showNoticeCard('连接未就绪，无法发送停止命令');
@@ -4585,6 +4857,8 @@
             const threads = parseInt(document.getElementById('officialThreads').value) || 100;
             const port = parseInt(document.getElementById('officialTestPort').value) || 443;
             const delay = parseInt(document.getElementById('officialDelay').value) || 0;
+            const edgeConfig = validateEdgeTestConfig();
+            if (!edgeConfig) return;
             const officialSpeedConfig = syncOfficialSpeedConfigState();
             const autoSpeed = String(document.getElementById('officialAutoSpeed')?.value || 'off').toLowerCase() === 'on';
             officialSpeedEnabledForResults = autoSpeed && officialSpeedConfig.speedLimit > 0;
@@ -4633,6 +4907,13 @@
                 officialSpeedURL: officialSpeedConfig.url,
                 officialSpeedMin: officialSpeedConfig.speedMin,
                 officialSpeedLimit: officialSpeedConfig.speedLimit,
+                edgeTestEnabled: edgeConfig.enabled,
+                edgeTestHost: edgeConfig.host,
+                edgeTestPort: edgeConfig.port,
+                edgeTestProtocol: edgeConfig.protocol,
+                edgeTestUUID: edgeConfig.uuid,
+                edgeTestPath: edgeConfig.path,
+                edgeTestTargetURL: edgeConfig.targetURL,
             } })) {
                 officialAutoSpeedPending = false;
                 officialAutoStage = '';
@@ -5776,6 +6057,7 @@
                     break;
                 case 'config_data':
                     applyConfigValues(mapCLIConfigToForm(msg.data));
+                    savePageStateToLS();
                     log('配置文件已从服务器加载');
                     break;
                 case 'scan_progress':
@@ -5788,12 +6070,13 @@
                     break;
                 case 'scan_complete_wait_dc':
                     const wasStoppingScan = isStoppingTask;
-                    finishRunningTask('✨ 重新开始扫描');
+                    const edgeBatchEnabled = !!document.getElementById('edgeTestEnabled')?.checked;
+                    if (!edgeBatchEnabled) finishRunningTask('✨ 重新开始扫描');
                     if (currentMode === 'official') {
                         sortAndRenderScanResults();
                         showDCSelection(msg.data);
                         if (!wasStoppingScan) {
-                            completeProgressWithCurrentCount('扫描完成，选择数据中心');
+                            completeProgressWithCurrentCount(edgeBatchEnabled ? '扫描完成，正在并发测试全部节点' : '扫描完成，选择数据中心');
                         }
                     }
                     break;
@@ -5832,6 +6115,29 @@
                 case 'speed_test_result':
                     if (isStoppingTask) break;
                     updateSpeedResult(msg.data);
+                    break;
+                case 'edge_test_result':
+                    {
+                        const data = msg.data || {};
+                        const result = document.getElementById('edgeTestResult');
+                        if (result) {
+                            const protocol = String(data.protocol || '').toUpperCase();
+                            const latency = Number.isFinite(Number(data.latencyMs)) ? `，${data.latencyMs} ms` : '';
+                            result.textContent = data.success ? `✅ ${protocol} 可用（HTTP ${data.status || 0}${latency}）` : `❌ ${protocol} 失败${data.error ? `：${data.error}` : ''}`;
+                            result.style.color = data.success ? '#10b981' : '#ef4444';
+                        }
+                        if (data.success) {
+                            progressBar.style.background = 'linear-gradient(to right, #10b981, #34d399)';
+                            progressBar.style.width = '100%';
+                            progressBar.style.animation = 'none';
+                            progressBar.textContent = 'EdgeTunnel 测试成功';
+                        } else {
+                            progressBar.style.background = 'var(--error-color)';
+                            progressBar.style.width = '100%';
+                            progressBar.style.animation = 'none';
+                            progressBar.textContent = 'EdgeTunnel 测试失败';
+                        }
+                    }
                     break;
                 case 'official_speed_progress':
                     if (isStoppingTask) break;
@@ -6094,6 +6400,7 @@
                     log(msg.data);
                     break;
                 case 'task_complete':
+                    savePageStateToLS();
                     if (isStoppingTask) {
                         resetStoppedTaskUI('已手动终止');
                         log('任务已手动终止');
@@ -6104,6 +6411,7 @@
                         break;
                     }
                     finishRunningTask('✨ 开始扫描与测试');
+                    if (currentMode === 'official' && document.getElementById('edgeTestEnabled')?.checked) showDCSelection(dcList);
                     updateBatchSpeedButton();
                     if (officialTestCompletePending) {
                         officialTestCompletePending = false;
@@ -6163,12 +6471,16 @@
         }
 
         window.addEventListener('DOMContentLoaded', () => {
+            document.addEventListener('input', savePageStateToLS);
+            document.addEventListener('change', savePageStateToLS);
             connect();
             initializeUI();
             renderGitHubAccounts();
             switchMode('official');
+            loadPageStateFromLS();
             initThemeFromStorage();
         });
+        window.addEventListener('beforeunload', flushPageStateToLS);
 
         function autoThemeBySystem() {
             const saved = localStorage.getItem('cfdata-theme') || 'auto';

@@ -138,6 +138,18 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if params.Delay < 0 {
 				params.Delay = 0
 			}
+			if params.EdgeTestEnabled {
+				if strings.TrimSpace(params.EdgeTestHost) == "" || strings.TrimSpace(params.EdgeTestUUID) == "" {
+					session.sendWSMessage("error", "已开启 EdgeTunnel 延迟测试，请先配置域名和 UUID/密码")
+					return
+				}
+				if params.EdgeTestProtocol == "" {
+					params.EdgeTestProtocol = "vless"
+				}
+				if params.EdgeTestPort <= 0 {
+					params.EdgeTestPort = 443
+				}
+			}
 			scanMode := params.ScanMode
 			if scanMode == "" {
 				scanMode = scanModeTCPing
@@ -145,7 +157,15 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			autoSpeed := params.AutoSpeed && params.OfficialSpeedLimit > 0
 			session.startTaskNamed("官方优选扫描", "official", map[string]interface{}{"ipType": params.IPType, "threads": params.Threads, "port": params.Port, "delay": params.Delay, "scanMode": scanMode, "autoSpeed": autoSpeed}, func(ctx context.Context, session *appSession) {
 				runOfficialTask(ctx, session, params.IPType, params.Threads, params.Port, params.Delay, scanMode)
-				if ctx.Err() != nil || !autoSpeed || !session.isBackgroundTask() {
+				if ctx.Err() != nil {
+					return
+				}
+				if params.EdgeTestEnabled {
+					runEdgeDetailedTest(ctx, session, "", params.Delay, startEdgeTestRequest{Host: params.EdgeTestHost, Port: params.EdgeTestPort, Protocol: params.EdgeTestProtocol, UUID: params.EdgeTestUUID, Path: params.EdgeTestPath, TargetURL: params.EdgeTestTargetURL})
+					if ctx.Err() != nil || !autoSpeed || !session.isBackgroundTask() {
+						return
+					}
+				} else if !autoSpeed || !session.isBackgroundTask() {
 					return
 				}
 				dc := strings.TrimSpace(params.OfficialTargetDC)
@@ -158,7 +178,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if dc == "" || ctx.Err() != nil {
 					return
 				}
-				runDetailedTest(ctx, session, dc, params.OfficialSpeedPort, params.Delay, scanMode)
+				if params.EdgeTestEnabled {
+					runEdgeDetailedTest(ctx, session, dc, params.Delay, startEdgeTestRequest{Host: params.EdgeTestHost, Port: params.EdgeTestPort, Protocol: params.EdgeTestProtocol, UUID: params.EdgeTestUUID, Path: params.EdgeTestPath, TargetURL: params.EdgeTestTargetURL})
+				} else {
+					runDetailedTest(ctx, session, dc, params.OfficialSpeedPort, params.Delay, scanMode)
+				}
 				if ctx.Err() != nil || !session.isBackgroundTask() || params.OfficialSpeedLimit <= 0 {
 					return
 				}
@@ -186,12 +210,28 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if params.Delay < 0 {
 				params.Delay = 0
 			}
+			if params.EdgeTestEnabled {
+				if strings.TrimSpace(params.EdgeTestHost) == "" || strings.TrimSpace(params.EdgeTestUUID) == "" {
+					session.sendWSMessage("error", "已开启 EdgeTunnel 延迟测试，请先配置域名和 UUID/密码")
+					return
+				}
+				if params.EdgeTestProtocol == "" {
+					params.EdgeTestProtocol = "vless"
+				}
+				if params.EdgeTestPort <= 0 {
+					params.EdgeTestPort = 443
+				}
+			}
 			scanMode := params.ScanMode
 			if scanMode == "" {
 				scanMode = scanModeTCPing
 			}
-			session.startTaskNamed("官方详细测试", "official", map[string]interface{}{"dc": params.DC, "port": params.Port, "delay": params.Delay, "scanMode": scanMode}, func(ctx context.Context, session *appSession) {
-				runDetailedTest(ctx, session, params.DC, params.Port, params.Delay, scanMode)
+			session.startTaskNamed("官方详细测试", "official", map[string]interface{}{"dc": params.DC, "port": params.Port, "delay": params.Delay, "scanMode": scanMode, "edgeTestEnabled": params.EdgeTestEnabled}, func(ctx context.Context, session *appSession) {
+				if params.EdgeTestEnabled {
+					runEdgeDetailedTest(ctx, session, params.DC, params.Delay, startEdgeTestRequest{Host: params.EdgeTestHost, Port: params.EdgeTestPort, Protocol: params.EdgeTestProtocol, UUID: params.EdgeTestUUID, Path: params.EdgeTestPath, TargetURL: params.EdgeTestTargetURL})
+				} else {
+					runDetailedTest(ctx, session, params.DC, params.Port, params.Delay, scanMode)
+				}
 			})
 		},
 		"start_speed_test": func(data json.RawMessage) {
@@ -205,6 +245,22 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			session.startTaskNamed("单 IP 测速", "official", map[string]interface{}{"ip": params.IP, "port": params.Port, "url": params.URL}, func(ctx context.Context, session *appSession) {
 				runSpeedTest(ctx, session, params.IP, params.Port, params.URL)
+			})
+		},
+		"start_edge_test": func(data json.RawMessage) {
+			var params startEdgeTestRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "start_edge_test 参数解析失败")
+				return
+			}
+			if params.Port <= 0 {
+				params.Port = 443
+			}
+			if strings.TrimSpace(params.Protocol) == "" {
+				params.Protocol = "vless"
+			}
+			session.startTaskNamed("单 IP EdgeTunnel 测试", "edge", map[string]interface{}{"ip": params.IP, "host": params.Host, "port": params.Port, "protocol": params.Protocol, "path": params.Path, "targetURL": params.TargetURL}, func(ctx context.Context, session *appSession) {
+				runEdgeTest(ctx, session, params)
 			})
 		},
 		"start_official_speed_batch": func(data json.RawMessage) {
