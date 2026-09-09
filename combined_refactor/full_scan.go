@@ -20,12 +20,13 @@ import (
 
 const (
 	fullScanDirectory     = "full_scan_data"
-	fullScanBatchSize     = 2000
+	fullScanBatchSize     = 500
 	fullScanMaxTargets    = 20_000_000
 	fullScanMinDelay      = 100               // 最小请求间隔（ms），防止被判定为攻击
 	fullScanMaxThreads    = 200               // 全库扫描最大并发数，降低同时连接数
-	fullScanBatchCooldown = 2 * time.Second   // 批次间冷却时间，降低持续高频请求被风控的风险
+	fullScanBatchCooldown = 500 * time.Millisecond // 批次间冷却时间，降低持续高频请求被风控的风险
 	fullScanJitterRange   = 50                // 随机抖动范围（ms），避免请求突发
+	fullScanProgressInterval = 100            // 每完成 N 个 IP 发一次进度更新
 )
 
 type fullScanFileInfo struct {
@@ -427,6 +428,7 @@ func runFullIPv4Scan(ctx context.Context, session *appSession, db *sql.DB, fileN
 
 	next := meta.NextIndex
 	for next < len(targets) && ctx.Err() == nil {
+		baseProcessed := meta.Processed
 		end := next + fullScanBatchSize
 		if end > len(targets) {
 			end = len(targets)
@@ -443,7 +445,12 @@ func runFullIPv4Scan(ctx context.Context, session *appSession, db *sql.DB, fileN
 				missing = append(missing, index)
 			}
 		}
-		records := scanFullIPv4Batch(ctx, targets, missing, meta.Threads, meta.Port, meta.Delay, subnetCache)
+		records := scanFullIPv4Batch(ctx, targets, missing, meta.Threads, meta.Port, meta.Delay, subnetCache, func(completed int) {
+			info := meta.fullScanFileInfo
+			info.Processed = baseProcessed + completed
+			info.Status = "running"
+			session.sendWSMessage("full_scan_progress", info)
+		})
 		for _, record := range records {
 			existing[record.TargetIndex] = true
 		}
@@ -555,7 +562,7 @@ func loadExistingFullScanIndices(db *sql.DB, start, end int) (map[int]bool, erro
 	return existing, rows.Err()
 }
 
-func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, threads, port, delay int, cache *fullScanSubnetCache) []fullScanRecord {
+func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, threads, port, delay int, cache *fullScanSubnetCache, onProgress func(completed int)) []fullScanRecord {
 	if len(indices) == 0 {
 		return nil
 	}
@@ -668,12 +675,22 @@ func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, thr
 			}
 		}
 	}()
+
+	// 并发读取结果，每 N 个发一次进度更新
+	records := make([]fullScanRecord, 0, len(shuffled))
+	done := make(chan struct{})
+	go func() {
+		for record := range results {
+			records = append(records, record)
+			if onProgress != nil && len(records)%fullScanProgressInterval == 0 {
+				onProgress(len(records))
+			}
+		}
+		close(done)
+	}()
 	workers.Wait()
 	close(results)
-	records := make([]fullScanRecord, 0, len(shuffled))
-	for record := range results {
-		records = append(records, record)
-	}
+	<-done
 	return records
 }
 
