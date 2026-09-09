@@ -393,6 +393,43 @@
             min-width: 0;
         }
 
+        .full-scan-stack {
+            flex: 1;
+            min-width: 0;
+            display: grid;
+            gap: 8px;
+        }
+
+        .full-scan-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            flex-wrap: wrap;
+        }
+
+        .full-scan-row select {
+            flex: 1 1 280px;
+        }
+
+        .full-scan-row .action-btn {
+            width: auto;
+            min-height: 38px;
+            margin-top: 0;
+            white-space: nowrap;
+        }
+
+        .full-scan-row .candidate-limit {
+            flex: 0 1 130px;
+        }
+
+        .full-scan-status {
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.6;
+            overflow-wrap: anywhere;
+        }
+
         .mini-action-btn {
             width: 34px;
             height: 34px;
@@ -1819,6 +1856,34 @@
                     </div>
                 </div>
                 <div class="option-item full-width">
+                    <span class="label">🗄️ 全库扫描</span>
+                    <div class="full-scan-stack">
+                        <div class="full-scan-row">
+                            <select id="fullScanFile" onchange="selectFullScanFile()">
+                                <option value="">暂无扫描文件</option>
+                            </select>
+                            <button class="mini-action-btn" title="刷新扫描文件列表" onclick="requestFullScanFiles()">↻</button>
+                            <button id="btnStartFullScan" class="action-btn export-btn" onclick="startFullScan()">新建扫描</button>
+                            <button id="btnResumeFullScan" class="action-btn" onclick="resumeFullScan()" disabled>继续</button>
+                            <button id="btnPauseFullScan" class="action-btn" onclick="pauseFullScan()" style="display:none;">暂停</button>
+                        </div>
+                        <div id="fullScanStatus" class="full-scan-status">每次新建独立文件；仅执行官方 TCPing 和 trace，不使用 EdgeTunnel。</div>
+                    </div>
+                </div>
+                <div class="option-item full-width">
+                    <span class="label">⚡ 缓存节点测试</span>
+                    <div class="full-scan-stack">
+                        <div class="full-scan-row">
+                            <select id="fullScanDC" disabled>
+                                <option value="">请先选择扫描文件</option>
+                            </select>
+                            <input id="fullScanCandidateLimit" class="candidate-limit" type="number" value="200" min="0" placeholder="候选数量">
+                            <button id="btnFullScanEdgeTest" class="action-btn export-btn" onclick="startFullScanEdgeTest()" disabled>EdgeTunnel 测试</button>
+                        </div>
+                        <div class="full-scan-status">候选数量默认 200，按 TCPing 延迟从低到高选择；填 0 测试该数据中心全部成功 IP。</div>
+                    </div>
+                </div>
+                <div class="option-item full-width">
                     <span class="label">⬆ 自动上传</span>
                     <select id="officialAutoUploadAccount"></select>
                 </div>
@@ -2450,6 +2515,11 @@
         const pageStateStorageKey = 'cfdata-page-state';
         let pageStateSaveTimer = null;
         let restoringPageState = false;
+        let fullScanActive = false;
+        let selectedFullScanInfo = null;
+        let fullScanFiles = [];
+        let fullScanEdgeTesting = false;
+        let fullScanTaskFailed = false;
 
         const LATENCY_COLORS = [
             { end: 50, color: '#1f8a3b' },
@@ -2737,6 +2807,7 @@
                     autoSpeed: selVal('officialAutoSpeed'),
                     targetDC: val('officialTargetDC'),
                     speedUrl: resolveSpeedTestUrl('officialSpeedUrl', 'officialSpeedUrlPreset'),
+                    fullScanCandidateLimit: val('fullScanCandidateLimit'),
                 },
                 nsb: {
                     scanMode: selVal('nsbScanMode'),
@@ -2786,6 +2857,7 @@
             setValue('officialSpeedLimit', o.speedLimit);
             setValue('officialAutoSpeed', o.autoSpeed);
             setValue('officialTargetDC', o.targetDC);
+            setValue('fullScanCandidateLimit', o.fullScanCandidateLimit);
             setValue('nsbScanMode', n.scanMode);
             setValue('nsbThreads', n.threads);
             setValue('nsbDelay', n.delay);
@@ -3081,6 +3153,220 @@
             }
         }
 
+        function fullScanStatusLabel(status) {
+            return ({ ready: '待开始', running: '扫描中', paused: '已暂停', completed: '已完成', failed: '异常中断' })[status] || status || '未知';
+        }
+
+        function renderFullScanStatus(info) {
+            selectedFullScanInfo = info || null;
+            const status = document.getElementById('fullScanStatus');
+            if (!status) return;
+            if (!info || !info.fileName) {
+                status.textContent = '每次新建独立文件；仅执行官方 TCPing 和 trace，不使用 EdgeTunnel。';
+                updateFullScanControls();
+                return;
+            }
+            const total = Number(info.total || 0);
+            const processed = Number(info.processed || 0);
+            const percent = total > 0 ? (processed / total * 100).toFixed(2) : '0.00';
+            status.textContent = `${info.fileName}｜${fullScanStatusLabel(info.status)}｜${processed.toLocaleString()}/${total.toLocaleString()} (${percent}%)｜成功 ${Number(info.success || 0).toLocaleString()}｜失败 ${Number(info.failed || 0).toLocaleString()}`;
+            updateFullScanControls();
+        }
+
+        function updateFullScanControls() {
+            const selected = selectedFullScanInfo;
+            const start = document.getElementById('btnStartFullScan');
+            const resume = document.getElementById('btnResumeFullScan');
+            const pause = document.getElementById('btnPauseFullScan');
+            const edge = document.getElementById('btnFullScanEdgeTest');
+            const dc = document.getElementById('fullScanDC');
+            if (start) start.disabled = isTaskRunning;
+            if (resume) resume.disabled = isTaskRunning || !selected || selected.status === 'completed';
+            if (pause) {
+                pause.style.display = fullScanActive ? 'inline-flex' : 'none';
+                pause.disabled = isStoppingTask;
+                pause.textContent = isStoppingTask ? '暂停中...' : '暂停';
+            }
+            if (edge) edge.disabled = isTaskRunning || !selected || !dc || !dc.value;
+        }
+
+        function requestFullScanFiles() {
+            if (!wsSend({ type: 'list_full_scans', data: {} })) return;
+        }
+
+        function handleFullScanFiles(files) {
+            fullScanFiles = Array.isArray(files) ? files : [];
+            const select = document.getElementById('fullScanFile');
+            if (!select) return;
+            const previous = select.value;
+            select.innerHTML = fullScanFiles.length
+                ? fullScanFiles.map((item) => `<option value="${escapeHTML(item.fileName)}">${escapeHTML(item.fileName)}｜${fullScanStatusLabel(item.status)}｜${Number(item.processed || 0).toLocaleString()}/${Number(item.total || 0).toLocaleString()}</option>`).join('')
+                : '<option value="">暂无扫描文件</option>';
+            if (previous && fullScanFiles.some((item) => item.fileName === previous)) select.value = previous;
+            const selectedName = select.value;
+            const selected = fullScanFiles.find((item) => item.fileName === selectedName) || null;
+            renderFullScanStatus(selected);
+            if (selectedName) {
+                wsSend({ type: 'get_full_scan_details', data: { fileName: selectedName } });
+            } else {
+                renderFullScanDataCenters([]);
+            }
+        }
+
+        function selectFullScanFile() {
+            const fileName = document.getElementById('fullScanFile')?.value || '';
+            const selected = fullScanFiles.find((item) => item.fileName === fileName) || null;
+            renderFullScanStatus(selected);
+            renderFullScanDataCenters([]);
+            if (fileName) wsSend({ type: 'get_full_scan_details', data: { fileName } });
+        }
+
+        function renderFullScanDataCenters(items) {
+            const select = document.getElementById('fullScanDC');
+            if (!select) return;
+            const rows = Array.isArray(items) ? items : [];
+            select.innerHTML = rows.length
+                ? '<option value="">选择数据中心</option>' + rows.map((item) => `<option value="${escapeHTML(item.DataCenter || '')}">${escapeHTML(item.DataCenter || '-')}｜${escapeHTML(item.DCCountry || '-')}｜${escapeHTML(item.City || '-')}｜${Number(item.IPCount || 0).toLocaleString()} IP｜最低 ${Number(item.MinLatency || 0)}ms</option>`).join('')
+                : '<option value="">暂无可用数据中心</option>';
+            select.disabled = rows.length === 0;
+            select.onchange = updateFullScanControls;
+            updateFullScanControls();
+        }
+
+        function startFullScan() {
+            if (requireProxyWarning(() => startFullScan())) return;
+            if (isTaskRunning) {
+                showNoticeCard('当前已有任务运行，请先暂停或等待完成');
+                return;
+            }
+            const threads = parseInt(document.getElementById('officialThreads')?.value, 10) || 100;
+            const port = parseInt(document.getElementById('officialTestPort')?.value, 10) || 443;
+            const delay = parseInt(document.getElementById('officialDelay')?.value, 10) || 0;
+            showConfirmCard(`将新建一个按当前时间命名的独立扫描文件。\n预计扫描约 166 万个 IPv4，只执行 TCPing 和 Cloudflare trace，不使用 EdgeTunnel。\n端口 ${port}，并发 ${threads}，延迟上限 ${delay || '不限'}ms。\n扫描可能持续很久，确认开始？`, confirmStartFullScan, '确认新建全库扫描');
+        }
+
+        function beginFullScanUI(label) {
+            fullScanActive = true;
+            fullScanTaskFailed = false;
+            isStoppingTask = false;
+            isTaskRunning = true;
+            runningTaskLabel = label;
+            runningTaskMode = 'fullscan';
+            runningTaskTab = 'scan';
+            setStartLoading('全库扫描中');
+            resetProgress();
+            progressBox.style.display = 'block';
+            updateFullScanControls();
+        }
+
+        function confirmStartFullScan() {
+            const threads = parseInt(document.getElementById('officialThreads')?.value, 10) || 100;
+            const port = parseInt(document.getElementById('officialTestPort')?.value, 10) || 443;
+            const delay = parseInt(document.getElementById('officialDelay')?.value, 10) || 0;
+            beginFullScanUI('IPv4 全库 TCPing 扫描');
+            if (!wsSend({ type: 'start_full_scan', data: { threads, port, delay } })) {
+                fullScanActive = false;
+                finishRunningTask();
+                updateFullScanControls();
+            }
+        }
+
+        function resumeFullScan() {
+            if (requireProxyWarning(() => resumeFullScan())) return;
+            if (isTaskRunning) {
+                showNoticeCard('当前已有任务运行，请先暂停或等待完成');
+                return;
+            }
+            const fileName = document.getElementById('fullScanFile')?.value || '';
+            if (!fileName || !selectedFullScanInfo) {
+                showNoticeCard('请先选择一个未完成的全库扫描文件');
+                return;
+            }
+            if (selectedFullScanInfo.status === 'completed') {
+                showNoticeCard('该扫描文件已经完成');
+                return;
+            }
+            showConfirmCard(`将从已保存的断点继续扫描：\n${fileName}\n已保存 ${Number(selectedFullScanInfo.processed || 0).toLocaleString()}/${Number(selectedFullScanInfo.total || 0).toLocaleString()}。\n确认继续？`, confirmResumeFullScan, '确认继续全库扫描');
+        }
+
+        function confirmResumeFullScan() {
+            const fileName = document.getElementById('fullScanFile')?.value || '';
+            if (!fileName) return;
+            beginFullScanUI('继续 IPv4 全库 TCPing 扫描');
+            if (!wsSend({ type: 'resume_full_scan', data: { fileName } })) {
+                fullScanActive = false;
+                finishRunningTask();
+                updateFullScanControls();
+            }
+        }
+
+        function pauseFullScan() {
+            if (!fullScanActive || isStoppingTask) return;
+            if (!wsSend({ type: 'stop_task', data: {} })) {
+                showNoticeCard('连接未就绪，无法暂停扫描');
+                return;
+            }
+            isStoppingTask = true;
+            updateFullScanControls();
+        }
+
+        function startFullScanEdgeTest() {
+            if (requireProxyWarning(() => startFullScanEdgeTest())) return;
+            if (isTaskRunning) {
+                showNoticeCard('当前已有任务运行，请先暂停或等待完成');
+                return;
+            }
+            const fileName = document.getElementById('fullScanFile')?.value || '';
+            const dc = document.getElementById('fullScanDC')?.value || '';
+            if (!fileName || !dc) {
+                showNoticeCard('请先选择全库扫描文件和数据中心');
+                return;
+            }
+            const edgeConfig = getEdgeTestConfig();
+            if (!edgeConfig.host || !edgeConfig.uuid) {
+                showNoticeCard('请先配置 EdgeTunnel 域名和 UUID/密码');
+                return;
+            }
+            if (edgeConfig.protocol !== 'vless' && edgeConfig.protocol !== 'trojan') {
+                showNoticeCard('EdgeTunnel 协议必须是 VLESS 或 Trojan');
+                return;
+            }
+            const limit = Math.max(0, parseInt(document.getElementById('fullScanCandidateLimit')?.value, 10) || 0);
+            showConfirmCard(`将从 ${fileName} 读取 ${dc} 的候选 IP，按 TCPing 延迟选择${limit > 0 ? `前 ${limit} 个` : '全部'}，再进行 EdgeTunnel 真实连接测试。\n确认开始？`, confirmStartFullScanEdgeTest, '确认 EdgeTunnel 测试');
+        }
+
+        function confirmStartFullScanEdgeTest() {
+            const edgeConfig = getEdgeTestConfig();
+            const fileName = document.getElementById('fullScanFile')?.value || '';
+            const dc = document.getElementById('fullScanDC')?.value || '';
+            const limit = Math.max(0, parseInt(document.getElementById('fullScanCandidateLimit')?.value, 10) || 0);
+            const delay = parseInt(document.getElementById('officialDelay')?.value, 10) || 0;
+            fullScanEdgeTesting = true;
+            fullScanTaskFailed = false;
+            isTaskRunning = true;
+            runningTaskLabel = `全库节点 ${dc} EdgeTunnel 测试`;
+            runningTaskMode = 'official';
+            runningTaskTab = 'test';
+            testData = [];
+            testResultsCount = 0;
+            document.querySelector('#testTable tbody').innerHTML = '';
+            updateBadge('testCount', 0);
+            setStartLoading('EdgeTunnel 测试中');
+            resetProgress();
+            progressBox.style.display = 'block';
+            if (!wsSend({ type: 'start_full_scan_edge_test', data: {
+                fileName, dc, limit, delay,
+                host: edgeConfig.host, port: edgeConfig.port, protocol: edgeConfig.protocol,
+                uuid: edgeConfig.uuid, path: edgeConfig.path, targetURL: edgeConfig.targetURL,
+            } })) {
+                fullScanEdgeTesting = false;
+                finishRunningTask();
+                updateFullScanControls();
+                return;
+            }
+            switchTab('test');
+        }
+
         let compactHitBuffer = [];
         let compactHitFlushTimer = null;
 
@@ -3103,6 +3389,7 @@
                 updateStatus('已连接服务器', true);
                 log('已连接服务器');
                 initThemeFromStorage();
+                requestFullScanFiles();
             };
             ws.onmessage = (event) => {
                 try {
@@ -3330,7 +3617,7 @@
         }
 
         function getTestModeLabel() {
-            return document.getElementById('edgeTestEnabled')?.checked ? 'EdgeTunnel' : getScanModeLabel();
+            return fullScanEdgeTesting || document.getElementById('edgeTestEnabled')?.checked ? 'EdgeTunnel' : getScanModeLabel();
         }
 
         function updateScanModeHint() {
@@ -3674,10 +3961,12 @@
         }
 
         function getRunningButtonText() {
+            if (runningTaskMode === 'fullscan') return '全库扫描中 - 暂停';
             return `${runningTaskLabel || '任务'}测试中 - 终止测试`;
         }
 
         function getStopConfirmText() {
+            if (runningTaskMode === 'fullscan') return '确定暂停当前全库扫描吗？已完成的进度会保存在扫描文件中。';
             return `确定要终止当前${runningTaskLabel || '任务'}吗？`;
         }
 
@@ -6060,6 +6349,47 @@
                     savePageStateToLS();
                     log('配置文件已从服务器加载');
                     break;
+                case 'full_scan_files':
+                    handleFullScanFiles(msg.data);
+                    break;
+                case 'full_scan_details':
+                    if (msg.data && msg.data.fileName === document.getElementById('fullScanFile')?.value) {
+                        renderFullScanStatus(msg.data);
+                        renderFullScanDataCenters(msg.data.dataCenters || []);
+                    }
+                    break;
+                case 'full_scan_started':
+                    fullScanActive = true;
+                    selectedFullScanInfo = msg.data || null;
+                    if (msg.data?.fileName) {
+                        const select = document.getElementById('fullScanFile');
+                        if (select && !Array.from(select.options).some((option) => option.value === msg.data.fileName)) {
+                            select.insertAdjacentHTML('afterbegin', `<option value="${escapeHTML(msg.data.fileName)}">${escapeHTML(msg.data.fileName)}｜扫描中</option>`);
+                        }
+                        if (select) select.value = msg.data.fileName;
+                    }
+                    renderFullScanStatus(msg.data);
+                    break;
+                case 'full_scan_progress':
+                    renderFullScanStatus(msg.data);
+                    updateProgress(msg.data?.processed || 0, msg.data?.total || 1, '全库 TCPing 扫描中');
+                    progressBar.textContent = `全库扫描 ${Number(msg.data?.processed || 0).toLocaleString()}/${Number(msg.data?.total || 0).toLocaleString()}`;
+                    break;
+                case 'full_scan_paused':
+                    renderFullScanStatus(msg.data);
+                    progressBar.style.background = 'var(--warning-color)';
+                    progressBar.style.animation = 'none';
+                    progressBar.textContent = `已暂停 ${Number(msg.data?.processed || 0).toLocaleString()}/${Number(msg.data?.total || 0).toLocaleString()}`;
+                    requestFullScanFiles();
+                    break;
+                case 'full_scan_complete':
+                    renderFullScanStatus(msg.data);
+                    progressBar.style.background = 'linear-gradient(to right, #10b981, #34d399)';
+                    progressBar.style.width = '100%';
+                    progressBar.style.animation = 'none';
+                    progressBar.textContent = `全库扫描完成 ${Number(msg.data?.total || 0).toLocaleString()}`;
+                    requestFullScanFiles();
+                    break;
                 case 'scan_progress':
                     if (isStoppingTask) break;
                     updateProgress(msg.data.current || 0, msg.data.total || 0, '扫描中');
@@ -6305,6 +6635,21 @@
                         nsbStopHandledByComplete = false;
                         break;
                     }
+                    if (fullScanActive || runningTaskMode === 'fullscan') {
+                        fullScanActive = false;
+                        finishRunningTask('✨ 开始扫描与测试');
+                        updateFullScanControls();
+                        requestFullScanFiles();
+                        log('全库扫描已暂停，进度已保存到扫描文件');
+                        break;
+                    }
+                    if (fullScanEdgeTesting) {
+                        fullScanEdgeTesting = false;
+                        resetStoppedTaskUI('EdgeTunnel 测试已终止');
+                        updateFullScanControls();
+                        log('EdgeTunnel 测试已终止');
+                        break;
+                    }
                     resetStoppedTaskUI('已手动终止');
                     log('任务已手动终止');
                     break;
@@ -6312,6 +6657,25 @@
                 case 'error':
                     recordWebDebugError('server_error', msg.data);
                     isStoppingTask = false;
+                    if (fullScanActive || runningTaskMode === 'fullscan') {
+                        fullScanTaskFailed = true;
+                        requestFullScanFiles();
+                        progressBar.style.background = 'var(--error-color)';
+                        progressBar.style.width = '100%';
+                        progressBar.style.animation = 'none';
+                        progressBar.textContent = '全库扫描失败';
+                        log('错误: ' + msg.data);
+                        break;
+                    }
+                    if (fullScanEdgeTesting) {
+                        fullScanTaskFailed = true;
+                        progressBar.style.background = 'var(--error-color)';
+                        progressBar.style.width = '100%';
+                        progressBar.style.animation = 'none';
+                        progressBar.textContent = 'EdgeTunnel 测试失败';
+                        log('错误: ' + msg.data);
+                        break;
+                    }
                     if (String(msg.data || '').includes('已有任务正在运行')) {
                         if (officialAutoSpeedPending && officialAutoStage === 'test') {
                             officialAutoStage = 'scan';
@@ -6319,19 +6683,14 @@
                             isTaskRunning = false;
                             showDCSelection(dcList);
                             window.setTimeout(maybeStartOfficialAutoTest, 300);
-                } else if (officialBatchSpeedRunning) {
-                    officialBatchSpeedRunning = false;
-                    finishRunningTask('✨ 开始扫描与测试');
-                } else if (nsbBatchSpeedRunning) {
-                    nsbBatchSpeedRunning = false;
-                    finishRunningTask('✨ 开始扫描与测试');
-                }
-                resetCurrentSpeedButton();
-                updateBatchSpeedButton();
-                updateNSBSpeedButtons();
-                log('错误: ' + msg.data);
-                break;
-            }
+                        } else if (officialBatchSpeedRunning) {
+                            officialBatchSpeedRunning = false;
+                            finishRunningTask('✨ 开始扫描与测试');
+                        } else if (nsbBatchSpeedRunning) {
+                            nsbBatchSpeedRunning = false;
+                            finishRunningTask('✨ 开始扫描与测试');
+                        }
+                    }
                     if (String(msg.data || '').includes('上传 GitHub')) {
                         setGitHubUploadStatus(String(msg.data), 'error');
                     }
@@ -6356,6 +6715,9 @@
                         progressBar.style.animation = 'none';
                         progressBar.textContent = '任务失败';
                     }
+                    resetCurrentSpeedButton();
+                    updateBatchSpeedButton();
+                    updateNSBSpeedButtons();
                     log('错误: ' + msg.data);
                     break;
 
@@ -6401,6 +6763,22 @@
                     break;
                 case 'task_complete':
                     savePageStateToLS();
+                    if (fullScanTaskFailed) {
+                        fullScanTaskFailed = false;
+                        fullScanActive = false;
+                        fullScanEdgeTesting = false;
+                        finishRunningTask('✨ 开始扫描与测试');
+                        updateFullScanControls();
+                        requestFullScanFiles();
+                        break;
+                    }
+                    if (fullScanActive || runningTaskMode === 'fullscan') {
+                        fullScanActive = false;
+                        finishRunningTask('✨ 开始扫描与测试');
+                        updateFullScanControls();
+                        requestFullScanFiles();
+                        break;
+                    }
                     if (isStoppingTask) {
                         resetStoppedTaskUI('已手动终止');
                         log('任务已手动终止');
@@ -6429,6 +6807,8 @@
                             if (!startOfficialBatchSpeed(true)) autoUploadOfficialResults();
                         }, 100);
                     }
+                    fullScanEdgeTesting = false;
+                    updateFullScanControls();
                     break;
             }
         }

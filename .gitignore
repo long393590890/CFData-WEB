@@ -46,6 +46,7 @@ combined_refactor/*.mmdb
 combined_refactor/ip.csv
 combined_refactor/ip.txt
 combined_refactor/*_failures.csv
+combined_refactor/full_scan_data/
 
 # Android build outputs
 .gradle/

@@ -58,6 +58,29 @@ type startEdgeTestRequest struct {
 	TargetURL string `json:"targetURL"`
 }
 
+type startFullScanRequest struct {
+	Threads int `json:"threads"`
+	Port    int `json:"port"`
+	Delay   int `json:"delay"`
+}
+
+type fullScanFileRequest struct {
+	FileName string `json:"fileName"`
+}
+
+type startFullScanEdgeTestRequest struct {
+	FileName  string `json:"fileName"`
+	DC        string `json:"dc"`
+	Limit     int    `json:"limit"`
+	Delay     int    `json:"delay"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Protocol  string `json:"protocol"`
+	UUID      string `json:"uuid"`
+	Path      string `json:"path"`
+	TargetURL string `json:"targetURL"`
+}
+
 type startOfficialSpeedBatchRequest struct {
 	Port       int          `json:"port"`
 	URL        string       `json:"url"`

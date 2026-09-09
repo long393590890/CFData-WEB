@@ -447,6 +447,101 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				runCompactIPv4Task(ctx, session)
 			})
 		},
+		"list_full_scans": func(data json.RawMessage) {
+			sendFullScanFiles(session)
+		},
+		"get_full_scan_details": func(data json.RawMessage) {
+			var params fullScanFileRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "全库扫描文件参数解析失败")
+				return
+			}
+			details, err := loadFullScanDetails(params.FileName)
+			if err != nil {
+				session.sendWSMessage("error", "读取全库扫描文件失败: "+err.Error())
+				return
+			}
+			session.sendWSMessage("full_scan_details", details)
+		},
+		"start_full_scan": func(data json.RawMessage) {
+			var params startFullScanRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "全库扫描参数解析失败")
+				return
+			}
+			if params.Threads <= 0 {
+				params.Threads = 100
+			}
+			if params.Threads > 1000 {
+				params.Threads = 1000
+			}
+			if params.Port <= 0 {
+				params.Port = 443
+			}
+			if params.Delay < 0 {
+				params.Delay = 0
+			}
+			session.startTaskNamed("IPv4 全库 TCPing 扫描", "fullscan", map[string]interface{}{"threads": params.Threads, "port": params.Port, "delay": params.Delay}, func(ctx context.Context, session *appSession) {
+				runFullIPv4ScanNew(ctx, session, params.Threads, params.Port, params.Delay)
+			})
+		},
+		"resume_full_scan": func(data json.RawMessage) {
+			var params fullScanFileRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "全库扫描文件参数解析失败")
+				return
+			}
+			session.startTaskNamed("继续 IPv4 全库 TCPing 扫描", "fullscan", map[string]interface{}{"fileName": params.FileName}, func(ctx context.Context, session *appSession) {
+				runFullIPv4ScanResume(ctx, session, params.FileName)
+			})
+		},
+		"start_full_scan_edge_test": func(data json.RawMessage) {
+			var params startFullScanEdgeTestRequest
+			if err := json.Unmarshal(data, &params); err != nil {
+				session.sendWSMessage("error", "全库节点 EdgeTunnel 参数解析失败")
+				return
+			}
+			if strings.TrimSpace(params.FileName) == "" || strings.TrimSpace(params.DC) == "" {
+				session.sendWSMessage("error", "请先选择全库扫描文件和数据中心")
+				return
+			}
+			if strings.TrimSpace(params.Host) == "" || strings.TrimSpace(params.UUID) == "" {
+				session.sendWSMessage("error", "请先配置 EdgeTunnel 域名和 UUID/密码")
+				return
+			}
+			params.Protocol = strings.ToLower(strings.TrimSpace(params.Protocol))
+			if params.Protocol != "vless" && params.Protocol != "trojan" {
+				session.sendWSMessage("error", "EdgeTunnel 协议必须是 VLESS 或 Trojan")
+				return
+			}
+			if params.Port <= 0 {
+				params.Port = 443
+			}
+			if params.Delay < 0 {
+				params.Delay = 0
+			}
+			if params.Limit < 0 {
+				params.Limit = 0
+			}
+			session.startTaskNamed("全库节点 EdgeTunnel 测试", "official", map[string]interface{}{"fileName": params.FileName, "dc": params.DC, "limit": params.Limit, "edgeTestEnabled": true}, func(ctx context.Context, session *appSession) {
+				candidates, err := loadFullScanCandidates(params.FileName, params.DC, params.Limit)
+				if err != nil {
+					session.sendWSMessage("error", "读取全库候选节点失败: "+err.Error())
+					return
+				}
+				if len(candidates) == 0 {
+					session.sendWSMessage("error", "所选数据中心没有可用候选 IP")
+					return
+				}
+				session.scanMutex.Lock()
+				session.scanResults = append([]ScanResult(nil), candidates...)
+				session.scanMutex.Unlock()
+				runEdgeDetailedTest(ctx, session, strings.ToUpper(strings.TrimSpace(params.DC)), params.Delay, startEdgeTestRequest{
+					Host: params.Host, Port: params.Port, Protocol: params.Protocol, UUID: params.UUID,
+					Path: params.Path, TargetURL: params.TargetURL,
+				})
+			})
+		},
 		"reset_all_config": func(data json.RawMessage) {
 			resetAllConfigFiles(session)
 		},

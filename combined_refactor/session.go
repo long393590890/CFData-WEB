@@ -314,13 +314,29 @@ func (s *appSession) applyBackgroundMessageLocked(msgType string, data interface
 		phase := fmt.Sprint(m["phase"])
 		current := asInt(m["current"])
 		total := asInt(m["total"])
-		
+
 		if phase == "scan" {
 			s.backgroundSnapshot.ScanFailed = max(current-s.backgroundSnapshot.ScanSuccess, 0)
 		} else if phase == "speed" {
 			s.backgroundSnapshot.SpeedQualified = current
 		}
 		s.updateProgressSnapshotLocked(text, current, total, text)
+	case "full_scan_started", "full_scan_progress", "full_scan_paused", "full_scan_complete":
+		info, ok := data.(fullScanFileInfo)
+		if !ok {
+			return
+		}
+		phase := "全库扫描中"
+		message := fmt.Sprintf("%s：%d/%d", info.FileName, info.Processed, info.Total)
+		if msgType == "full_scan_paused" {
+			phase = "全库扫描已暂停"
+		} else if msgType == "full_scan_complete" {
+			phase = "全库扫描完成"
+		}
+		s.backgroundSnapshot.ScanSuccess = info.Success
+		s.backgroundSnapshot.ScanFailed = info.Failed
+		s.backgroundSnapshot.ResultCount = info.Processed
+		s.updateProgressSnapshotLocked(phase, info.Processed, info.Total, message)
 	case "scan_result":
 		s.backgroundSnapshot.ResultCount++
 		s.backgroundSnapshot.ScanSuccess++
@@ -373,8 +389,13 @@ func (s *appSession) applyBackgroundMessageLocked(msgType string, data interface
 			s.nsbMutex.Unlock()
 		}
 	case "task_stopped":
-		s.backgroundSnapshot.Phase = "已停止"
-		s.backgroundSnapshot.Message = "任务已停止"
+		if s.backgroundSnapshot.Mode == "fullscan" {
+			s.backgroundSnapshot.Phase = "全库扫描已暂停"
+			s.backgroundSnapshot.Message = "扫描进度已保存，可从文件继续"
+		} else {
+			s.backgroundSnapshot.Phase = "已停止"
+			s.backgroundSnapshot.Message = "任务已停止"
+		}
 		s.backgroundSnapshot.Running = false
 	case "task_complete":
 		s.backgroundSnapshot.Phase = "完成"
