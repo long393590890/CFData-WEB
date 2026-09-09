@@ -478,8 +478,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if params.Port <= 0 {
 				params.Port = 443
 			}
-			if params.Delay < fullScanMinDelay {
-				params.Delay = fullScanMinDelay
+			if params.Delay < 0 {
+				params.Delay = 0
 			}
 			session.startTaskNamed("IPv4 全库 TCPing 扫描", "fullscan", map[string]interface{}{"threads": params.Threads, "port": params.Port, "delay": params.Delay}, func(ctx context.Context, session *appSession) {
 				runFullIPv4ScanNew(ctx, session, params.Threads, params.Port, params.Delay)
