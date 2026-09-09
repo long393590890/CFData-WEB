@@ -64,6 +64,10 @@ func scanOfficialIP(ctx context.Context, ip string, port int, delay int) (*ScanR
 	if err != nil {
 		return nil, "trace_request_failed", err.Error()
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		resp.Body.Close()
+		return nil, "rate_limited", "HTTP 429 Too Many Requests"
+	}
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	resp.Body.Close()
 	if err != nil {

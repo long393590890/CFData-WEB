@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,9 +19,13 @@ import (
 )
 
 const (
-	fullScanDirectory  = "full_scan_data"
-	fullScanBatchSize  = 2000
-	fullScanMaxTargets = 20_000_000
+	fullScanDirectory     = "full_scan_data"
+	fullScanBatchSize     = 2000
+	fullScanMaxTargets    = 20_000_000
+	fullScanMinDelay      = 100               // 最小请求间隔（ms），防止被判定为攻击
+	fullScanMaxThreads    = 200               // 全库扫描最大并发数，降低同时连接数
+	fullScanBatchCooldown = 2 * time.Second   // 批次间冷却时间，降低持续高频请求被风控的风险
+	fullScanJitterRange   = 50                // 随机抖动范围（ms），避免请求突发
 )
 
 type fullScanFileInfo struct {
@@ -56,6 +62,77 @@ type fullScanRecord struct {
 	LatencyMS       int64
 	FailureCategory string
 	FailureDetail   string
+}
+
+// fullScanSubnetCache 缓存 /24 子网对应的 DC 信息，同子网只做一次 trace 请求
+type fullScanSubnetCache struct {
+	mu      sync.Mutex
+	subnets map[string]*ScanResult
+}
+
+func newFullScanSubnetCache() *fullScanSubnetCache {
+	return &fullScanSubnetCache{subnets: make(map[string]*ScanResult)}
+}
+
+func ipPrefix(ip string) string {
+	parts := strings.SplitN(ip, ".", 4)
+	if len(parts) >= 3 {
+		return parts[0] + "." + parts[1] + "." + parts[2]
+	}
+	return ip
+}
+
+func (c *fullScanSubnetCache) get(ip string) (*ScanResult, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r, ok := c.subnets[ipPrefix(ip)]
+	return r, ok
+}
+
+func (c *fullScanSubnetCache) set(ip string, result *ScanResult) {
+	prefix := ipPrefix(ip)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.subnets[prefix]; !ok {
+		c.subnets[prefix] = result
+	}
+}
+
+// loadFullScanSubnetCacheFromDB 从已有扫描结果中加载子网缓存（用于断点续扫）
+func loadFullScanSubnetCacheFromDB(db *sql.DB) *fullScanSubnetCache {
+	cache := newFullScanSubnetCache()
+	rows, err := db.Query(`SELECT ip, data_center, dc_country, region, city FROM ip_results
+		WHERE status = 'success' AND data_center <> ''`)
+	if err != nil {
+		return cache
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ip, dc, country, region, city string
+		if err := rows.Scan(&ip, &dc, &country, &region, &city); err != nil {
+			continue
+		}
+		cache.set(ip, &ScanResult{
+			IP: ip, DataCenter: dc, DCCountry: country, Region: region, City: city,
+		})
+	}
+	return cache
+}
+
+// tcpPingIP 仅做 TCP 连接测试，不发 trace 请求（用于子网推断后的快速扫描）
+func tcpPingIP(ctx context.Context, ip string, port, delay int) (time.Duration, string, string) {
+	dialer := &net.Dialer{Timeout: timeout}
+	start := time.Now()
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)))
+	if err != nil {
+		return 0, "tcp_connect_failed", err.Error()
+	}
+	conn.Close()
+	duration := time.Since(start)
+	if delay > 0 && duration.Milliseconds() > int64(delay) {
+		return duration, "delay_exceeded", fmt.Sprintf("connect=%dms, delay=%dms", duration.Milliseconds(), delay)
+	}
+	return duration, "", ""
 }
 
 var (
@@ -341,7 +418,12 @@ func runFullIPv4Scan(ctx context.Context, session *appSession, db *sql.DB, fileN
 	meta.Status = "running"
 	session.sendWSMessage("full_scan_started", meta.fullScanFileInfo)
 	session.sendWSMessage("full_scan_progress", meta.fullScanFileInfo)
-	session.sendWSMessage("log", fmt.Sprintf("全库 TCPing 扫描开始：%s，共 %d 个 IPv4", fileName, len(targets)))
+	session.sendWSMessage("log", fmt.Sprintf("全库 TCPing 扫描开始：%s，共 %d 个 IPv4，速率限制 %dms/请求，并发 %d，已启用防封禁保护", fileName, len(targets), meta.Delay, meta.Threads))
+
+	// 子网推断缓存：从 DB 加载已有结果，同 /24 子网只做一次 trace
+	subnetCache := loadFullScanSubnetCacheFromDB(db)
+	// 被封锁信号检测
+	consecutiveHighFailureBatches := 0
 
 	next := meta.NextIndex
 	for next < len(targets) && ctx.Err() == nil {
@@ -361,7 +443,7 @@ func runFullIPv4Scan(ctx context.Context, session *appSession, db *sql.DB, fileN
 				missing = append(missing, index)
 			}
 		}
-		records := scanFullIPv4Batch(ctx, targets, missing, meta.Threads, meta.Port, meta.Delay)
+		records := scanFullIPv4Batch(ctx, targets, missing, meta.Threads, meta.Port, meta.Delay, subnetCache)
 		for _, record := range records {
 			existing[record.TargetIndex] = true
 		}
@@ -382,9 +464,53 @@ func runFullIPv4Scan(ctx context.Context, session *appSession, db *sql.DB, fileN
 		meta.UpdatedAt = time.Now().Format(time.RFC3339)
 		meta.fullScanFileInfo.Status = "running"
 		session.sendWSMessage("full_scan_progress", meta.fullScanFileInfo)
+
+		// 被封锁信号检测：检查是否触发 429 限流
+		rateLimitedCount := 0
+		for _, record := range records {
+			if record.FailureCategory == "rate_limited" {
+				rateLimitedCount++
+			}
+		}
+		if rateLimitedCount > 0 {
+			session.sendWSMessage("log", fmt.Sprintf("检测到 %d 个 IP 返回 HTTP 429（速率限制），自动暂停扫描以避免被封禁", rateLimitedCount))
+			_, _ = db.Exec(`UPDATE scan_meta SET status = 'paused', updated_at = ? WHERE id = 1`, time.Now().Format(time.RFC3339))
+			meta.Status = "paused"
+			meta.UpdatedAt = time.Now().Format(time.RFC3339)
+			session.sendWSMessage("full_scan_paused", meta.fullScanFileInfo)
+			session.sendWSMessage("log", fmt.Sprintf("全库扫描已暂停：%s，已保存 %d/%d，建议稍后降低并发或增加延迟后继续", fileName, meta.Processed, meta.Total))
+			sendFullScanFiles(session)
+			return
+		}
+
+		// 连续高失败率检测：如果连续 3 批全部失败，可能已被封锁
+		batchTotal := successes + failures
+		if batchTotal > 0 && successes == 0 {
+			consecutiveHighFailureBatches++
+			if consecutiveHighFailureBatches >= 3 {
+				session.sendWSMessage("log", "连续 3 批扫描全部失败，可能已被封锁或网络异常，自动暂停扫描")
+				_, _ = db.Exec(`UPDATE scan_meta SET status = 'paused', updated_at = ? WHERE id = 1`, time.Now().Format(time.RFC3339))
+				meta.Status = "paused"
+				meta.UpdatedAt = time.Now().Format(time.RFC3339)
+				session.sendWSMessage("full_scan_paused", meta.fullScanFileInfo)
+				session.sendWSMessage("log", fmt.Sprintf("全库扫描已暂停：%s，已保存 %d/%d", fileName, meta.Processed, meta.Total))
+				sendFullScanFiles(session)
+				return
+			}
+		} else {
+			consecutiveHighFailureBatches = 0
+		}
+
 		next = checkpoint
 		if checkpoint < end {
 			break
+		}
+		// 批次间冷却，降低持续高频请求被风控的风险
+		if fullScanBatchCooldown > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(fullScanBatchCooldown):
+			}
 		}
 	}
 
@@ -429,52 +555,112 @@ func loadExistingFullScanIndices(db *sql.DB, start, end int) (map[int]bool, erro
 	return existing, rows.Err()
 }
 
-func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, threads, port, delay int) []fullScanRecord {
+func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, threads, port, delay int, cache *fullScanSubnetCache) []fullScanRecord {
 	if len(indices) == 0 {
 		return nil
 	}
 	if threads <= 0 {
 		threads = 100
 	}
+	if threads > fullScanMaxThreads {
+		threads = fullScanMaxThreads
+	}
 	if threads > len(indices) {
 		threads = len(indices)
 	}
+
+	// 打乱扫描顺序，避免连续 IP 段被判定为端口扫描
+	shuffled := make([]int, len(indices))
+	copy(shuffled, indices)
+	rand.Shuffle(len(shuffled), func(i, j int) {
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	})
+
+	// 全局速率限制器：所有 worker 共享一个 ticker，控制每秒新建连接数
+	rateInterval := time.Duration(delay) * time.Millisecond
+	if rateInterval < time.Duration(fullScanMinDelay)*time.Millisecond {
+		rateInterval = time.Duration(fullScanMinDelay) * time.Millisecond
+	}
+	rateLimiter := time.NewTicker(rateInterval)
+	defer rateLimiter.Stop()
+
 	jobs := make(chan int)
-	results := make(chan fullScanRecord, len(indices))
+	results := make(chan fullScanRecord, len(shuffled))
 	var workers sync.WaitGroup
 	for worker := 0; worker < threads; worker++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
+				// 等待全局速率限制器放行
+				select {
+				case <-ctx.Done():
+					return
+				case <-rateLimiter.C:
+				}
+				// 随机抖动，进一步分散请求，避免同步突发
+				if fullScanJitterRange > 0 {
+					jitter := time.Duration(rand.Intn(fullScanJitterRange)) * time.Millisecond
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(jitter):
+					}
+				}
+
 				if ctx.Err() != nil {
 					return
 				}
 				ipNumber := targets[index]
 				ip := uint32ToIPv4(ipNumber)
-				result, category, detail := scanOfficialIP(ctx, ip, port, delay)
-				if ctx.Err() != nil {
-					return
+
+				// 子网推断：如果同 /24 已有 DC 信息，只做 TCP ping，不发 trace 请求
+				if cached, ok := cache.get(ip); ok {
+					duration, category, detail := tcpPingIP(ctx, ip, port, delay)
+					if ctx.Err() != nil {
+						return
+					}
+					record := fullScanRecord{TargetIndex: index, IP: ip, IPNumber: ipNumber, FailureCategory: category, FailureDetail: detail}
+					if len(record.FailureDetail) > 1000 {
+						record.FailureDetail = record.FailureDetail[:1000]
+					}
+					if category == "" {
+						record.Success = true
+						record.DataCenter = cached.DataCenter
+						record.DCCountry = cached.DCCountry
+						record.Region = cached.Region
+						record.City = cached.City
+						record.LatencyMS = duration.Milliseconds()
+					}
+					results <- record
+				} else {
+					// 首次扫描该子网：完整 TCP + trace 请求
+					result, category, detail := scanOfficialIP(ctx, ip, port, delay)
+					if ctx.Err() != nil {
+						return
+					}
+					record := fullScanRecord{TargetIndex: index, IP: ip, IPNumber: ipNumber, FailureCategory: category, FailureDetail: detail}
+					if len(record.FailureDetail) > 1000 {
+						record.FailureDetail = record.FailureDetail[:1000]
+					}
+					if result != nil {
+						record.Success = true
+						record.DataCenter = result.DataCenter
+						record.DCCountry = result.DCCountry
+						record.Region = result.Region
+						record.City = result.City
+						record.LatencyMS = result.TCPDuration.Milliseconds()
+						// 缓存 DC 信息，同子网后续 IP 不再发 trace
+						cache.set(ip, result)
+					}
+					results <- record
 				}
-				record := fullScanRecord{TargetIndex: index, IP: ip, IPNumber: ipNumber, FailureCategory: category, FailureDetail: detail}
-				if len(record.FailureDetail) > 1000 {
-					record.FailureDetail = record.FailureDetail[:1000]
-				}
-				if result != nil {
-					record.Success = true
-					record.DataCenter = result.DataCenter
-					record.DCCountry = result.DCCountry
-					record.Region = result.Region
-					record.City = result.City
-					record.LatencyMS = result.TCPDuration.Milliseconds()
-				}
-				results <- record
 			}
 		}()
 	}
 	go func() {
 		defer close(jobs)
-		for _, index := range indices {
+		for _, index := range shuffled {
 			select {
 			case <-ctx.Done():
 				return
@@ -484,7 +670,7 @@ func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, thr
 	}()
 	workers.Wait()
 	close(results)
-	records := make([]fullScanRecord, 0, len(indices))
+	records := make([]fullScanRecord, 0, len(shuffled))
 	for record := range results {
 		records = append(records, record)
 	}
