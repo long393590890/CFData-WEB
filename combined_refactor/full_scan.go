@@ -429,6 +429,8 @@ func runFullIPv4Scan(ctx context.Context, session *appSession, db *sql.DB, fileN
 	next := meta.NextIndex
 	for next < len(targets) && ctx.Err() == nil {
 		baseProcessed := meta.Processed
+		baseSuccess := meta.Success
+		baseFailed := meta.Failed
 		end := next + fullScanBatchSize
 		if end > len(targets) {
 			end = len(targets)
@@ -445,9 +447,11 @@ func runFullIPv4Scan(ctx context.Context, session *appSession, db *sql.DB, fileN
 				missing = append(missing, index)
 			}
 		}
-		records := scanFullIPv4Batch(ctx, targets, missing, meta.Threads, meta.Port, meta.Delay, subnetCache, func(completed int) {
+		records := scanFullIPv4Batch(ctx, targets, missing, meta.Threads, meta.Port, meta.Delay, subnetCache, func(completed, successes, failures int) {
 			info := meta.fullScanFileInfo
 			info.Processed = baseProcessed + completed
+			info.Success = baseSuccess + successes
+			info.Failed = baseFailed + failures
 			info.Status = "running"
 			session.sendWSMessage("full_scan_progress", info)
 		})
@@ -562,7 +566,7 @@ func loadExistingFullScanIndices(db *sql.DB, start, end int) (map[int]bool, erro
 	return existing, rows.Err()
 }
 
-func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, threads, port, delay int, cache *fullScanSubnetCache, onProgress func(completed int)) []fullScanRecord {
+func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, threads, port, delay int, cache *fullScanSubnetCache, onProgress func(completed, successes, failures int)) []fullScanRecord {
 	if len(indices) == 0 {
 		return nil
 	}
@@ -680,10 +684,17 @@ func scanFullIPv4Batch(ctx context.Context, targets []uint32, indices []int, thr
 	records := make([]fullScanRecord, 0, len(shuffled))
 	done := make(chan struct{})
 	go func() {
+		batchSuccess := 0
+		batchFail := 0
 		for record := range results {
 			records = append(records, record)
+			if record.Success {
+				batchSuccess++
+			} else {
+				batchFail++
+			}
 			if onProgress != nil && len(records)%fullScanProgressInterval == 0 {
-				onProgress(len(records))
+				onProgress(len(records), batchSuccess, batchFail)
 			}
 		}
 		close(done)
